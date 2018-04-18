@@ -1,0 +1,10 @@
+# Include miscelleaneous files in root directory
+include LICENSE
+include README.md
+include TODO.md
+
+# Include tests
+recursive-include test *
+
+# Include demos
+recursive-include demo *
