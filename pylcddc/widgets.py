@@ -1105,4 +1105,80 @@ class Frame(Widget, WidgetContainer):
 
 
 class Num(Widget):
-    pass
+    """
+    Widget representing a big decimal digit
+    """
+
+    class SpecialDigit(enum.Enum):
+        COLON = 10
+
+    def __init__(self, name: str, x: int,
+                 digit: typing.Union[int, SpecialDigit]):
+        """
+        Instantiate a new bignum widget
+
+        Bignums are large decimal digits 3 characters wide and 4 characters
+        tall
+
+        :param name: name of the widget
+        :param x: x-coordinate to display the digit at
+        :param digit: digit to display, or an equivalent special digit to
+                      display.
+        :raises: ValueError: on invalid arguments
+        """
+        super().__init__(WidgetType.BIGNUM, name)
+        self._validate_params(x, digit)
+
+        self._x = x
+        self._digit = digit
+
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}({self.name!r}, {self.x!r}, '
+                f'{self.digit!r})')
+
+    def _validate_params(self, x: int, digit: typing.Union[int, SpecialDigit]):
+        if x < 1:
+            raise ValueError(f'invalid bignum placement position: x: {x}')
+        if isinstance(digit, int):
+            if digit not in range(10):
+                raise ValueError(f'invalid decimal digit to display: {digit}')
+
+    @property
+    def x(self) -> int:
+        """
+        Access the coordinate this big decimal digit is displayed at.
+
+        :return: coordinate this digit is displayed at
+        :raises ValueError: when set to an invalid value
+        """
+        return self._x
+
+    @x.setter
+    def x(self, new_x: int):
+        self._validate_params(new_x, self.digit)
+        self._x = new_x
+
+    @property
+    def digit(self) -> typing.Union[int, SpecialDigit]:
+        """
+        Access the digit / special digit displayed
+
+        :return: digit / special digit displayed
+        :raises ValueError: when set to an invalid value
+        """
+        return self._digit
+
+    @digit.setter
+    def digit(self, new_digit: typing.Union[int, SpecialDigit]):
+        self._validate_params(self.x, new_digit)
+        self._digit = new_digit
+
+    def state_update_requests(self, screen_id: int,
+                              widget_ids: typing.Sequence[int]) \
+            -> typing.Sequence[bytes]:
+        reqs = list()
+        reqs.append(commands.CommandGenerator.generate_set_widget_parms_command(
+            screen_id, widget_ids[0], self.x,
+            self.digit if isinstance(self.digit, int) else self.digit.value
+        ))
+        return reqs

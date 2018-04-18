@@ -8,19 +8,14 @@ Linux-specific POSIX timers
 
 Features:
 
-- Object-oriented interface support for nearly all native 
-  ``LCDd`` widgets - bignum *TODO*
+- Object-oriented interface support for all native 
+  ``LCDd`` widgets
     - Full frame support, nest widget objects in frames, treat frames 
       like widget containers
 - Decoupled thread to service ``LCDd`` screen switching responses 
 - One I/O method to update screen, no funky exception handling everywhere
 
 # More TODOs
-- Implement formal tests
-- Add another widget type for user-created widgets, framework is 
-  there, but needs more documentation - make your
-  own composite widgets and use them just like any native 
-  widget supported by the library.
 - See ``TODO.md`` for more information and TODOs
 
 # Version support

@@ -2,7 +2,6 @@
 
 # High priority 
 - Write tests for pre-existing functionality
-- Implement support for ``bignum``
 - Implement support for setting client attributes
 - Find out precisely what characters need to be escaped 
 
