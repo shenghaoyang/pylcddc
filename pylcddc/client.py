@@ -43,9 +43,9 @@ class IOThread(threading.Thread):
        - A socket is used as a signalling mechanism for notifying the
          I/O thread that the client has information to send.
        - The socket is also used to signal to the client that a response
-         for the clients' synchronous message has arrived.
-       - Two queues are used to contain the actual messages to be sent /
-         received from LCDd.
+         for the client's synchronous message has arrived.
+       - One queue is used to contain the requests destined for LCDd,
+         and another is used to contain the responses received.
 
     It uses selectors on the I/O file descriptors to avoid putting the
     system into a busy wait loop.
@@ -56,15 +56,16 @@ class IOThread(threading.Thread):
           error conditions / others.
 
     Thread exit is used to signal to the client that the communications
-    channel with LCDd may be corrupted. Thread exit occurs in the following
-    situations:
+    channel with LCDd may be corrupted. It may occur in the following cases:
         - Failure to communicate over the LCDd socket.
         - Failure to communicate over the client socket.
         - Failure to communicate over inter-thread queues.
         - Failure to execute callback for asynchronous messages.
 
     On thread exit:
-        - Only the thread side of the communication socket is closed.
+        - The thread side of the communication socket-pair is closed, to notify
+          the waiting user thread if the user thread was blocked.
+        - The thread stop condition variable is set.
     """
 
     def __init__(self, lcdd_socket: socket.SocketType,
@@ -79,38 +80,34 @@ class IOThread(threading.Thread):
         :param async_callback: callback used to process asynchronous responses
                                from LCDd.
                                This callback is called in the IOThread's
-                               context, and there isn't much time for
-                               this callback to execute. Users are
-                               advised to keep their callbacks short
+                               context, Users are advised to keep their
+                               callbacks short. No requests can be made to LCDd
+                               within the callback.
         :param max_queued_requests: maximum number of requests that can
                                     be queued to the thread at once.
         :raises OSError: on inability to initialize the I/O thread
         """
         super().__init__(name='pylcddc I/O thread')
 
-        # Set instance attributes
         self._lcdd_socket = lcdd_socket
         self._async_callback = async_callback
         self._closed = False
         self._max_queued_requests = max_queued_requests
 
-        # Create signalling sockets for use
+        # AF_UNIX for reliable datagram sockets, as opposed to AF_INET
+        # SOCK_SEQPACKET guarantees reliability, but Windows will probably
+        # never support it. At least Windows is starting to support AF_UNIX.
         self._signalling_sockets = socket.socketpair(family=socket.AF_UNIX,
                                                      type=socket.SOCK_DGRAM)
         self._signal_socket = self._signalling_sockets[0]
         self._client_signal_socket = self._signalling_sockets[1]
 
-        # Create transmit and receive queues
         self._transmit_queue = queue.Queue(self.max_queued_requests)
         self._receive_queue = queue.Queue(self.max_queued_requests)
 
-        # Create stop event object
         self._stop_thread = threading.Event()
-
-        # Create thread death exception storage
         self._thread_death_exception = None
 
-        # Start the thread
         self.start()
 
     @property
@@ -298,18 +295,18 @@ class IOThread(threading.Thread):
         try:
             def send_request():
                 nonlocal requests_dispatched, pending_synchronous_replies
-                # client has sent us a new command
-                # handle the command
                 self._signal_socket.settimeout(0)
                 buf = self._signal_socket.recv(struct.calcsize('@Nd?'))
                 if not buf:
                     raise IOError('Client request length read error')
+
                 num_requests, timeout, block = struct.unpack('@Nd?', buf)
                 requests = bytearray()
+
                 for __ in range(num_requests):
                     request_bytes = self._transmit_queue.get(False)
                     requests.extend(request_bytes)
-                # send request bytes to target
+
                 self._lcdd_socket.settimeout(None if block else timeout)
                 self._lcdd_socket.sendall(requests)
                 requests_dispatched = num_requests
@@ -324,10 +321,9 @@ class IOThread(threading.Thread):
                 if not buf:
                     raise IOError('LCDd terminated connection')
                 lcdd_buffer.extend(buf)
-                if len(buf) > (responses.MAX_RESPONSE_LENGTH
-                               * self.max_queued_requests):
-                    raise IOError('No valid message from LCDd after reaching '
-                                  'buffer limit')
+                if len(lcdd_buffer) > (responses.MAX_RESPONSE_LENGTH
+                                       * self.max_queued_requests):
+                    raise IOError('RX buffer limit reached - no valid response')
 
                 res = lcdd_buffer.splitlines(True)
                 for r in res:
@@ -385,7 +381,7 @@ class Client(Mapping):
     information regarding the display connected to LCDd.
     """
 
-    def __init__(self, host: str, port: int,
+    def __init__(self, host: str = 'localhost', port: int = 13666,
                  timeout: typing.Union[None, float] = 1,
                  max_queued_requests: int = 0x1000):
         """
@@ -396,14 +392,10 @@ class Client(Mapping):
         :param port: port to connect to
         :param timeout: timeout for client operations.
                         this sets the timeout for operations, such as:
-                        connecting to LCDd, sending batch operations to LCDd,
-                        sending single operations to LCDd, and
-                        receiving responses
-                        from LCDd.
+                        connecting, creating screens, deleting screens,
+                        and updating screens.
         :param max_queued_requests: maximum number of batched requests
-                                    sent to the I/O handler thread at once
-                                    with ``_request_multiple()``
-
+                                    sent to the I/O handler thread at once.
         :raises FatalError: on failure to setup the connection subsystem
                             and have it connect to LCDd
         :raises ValueError: on invalid arguments
@@ -411,15 +403,12 @@ class Client(Mapping):
         self._closed = True
         self._good = False
         self._timeout = timeout
-
         self._serv_info_resp = None
-
         self._screen_id_cnt = 0
         self._screens = dict()
         self._screen_ids = dict()
 
         start_time = time.monotonic()
-
         try:
             self._socket = socket.create_connection((host, port), timeout)
             self._closed = False
@@ -473,30 +462,30 @@ class Client(Mapping):
 
     def __len__(self) -> int:
         """
-        Obtain the number of screens provided by this client to LCDd
+        Obtain the number of screens provided by this client to LCDd.
 
-        :return: screen number
+        :return: screen number.
         """
         return len(self._screens)
 
     def _async_response_handler(self, response: responses.BaseResponse):
         """
         Response handler for asynchronous responses that can come from
-        LCDd
+        LCDd.
 
-        :param response: asynchronous response from LCDd
-        :return: None
+        :param response: asynchronous response from LCDd.
+        :return: None.
         """
         pass
 
     def _request(self, msg: bytes, timeout: typing.Union[float, None] = 1) \
             -> responses.BaseResponse:
         """
-        Send a request to LCDd
+        Send a request to LCDd.
 
-        :param msg: request to send to LCDd
+        :param msg: request to send to LCDd.
         :param timeout: timeout value, see ``socket.settimeout()``.
-        :return: response object representing the response from LCDd
+        :return: response object representing the response from LCDd.
 
         :raises FatalError: on fatal internal error, or operation timing out.
                             both situations are fatal as we have
@@ -514,11 +503,11 @@ class Client(Mapping):
             timeout: typing.Union[float, None] = 1) \
             -> typing.Sequence[responses.BaseResponse]:
         """
-        Send multiple requests to LCDd
+        Send multiple requests to LCDd.
 
-        :param msgs: requests to send to LCDd
+        :param msgs: requests to send to LCDd.
         :param timeout: timeout value, see ``socket.settimeout()``.
-        :return: response objects representing the response from LCDd
+        :return: response objects representing the response from LCDd.
 
         :raises FatalError: on fatal internal error, or operation timing out.
                             both situations are fatal as we have
@@ -546,9 +535,9 @@ class Client(Mapping):
     @property
     def closed(self) -> bool:
         """
-        Check if the connection between LCDd and the client is open
+        Check if the connection between LCDd and the client is open.
 
-        :return: connection status
+        :return: connection status.
 
         .. note::
             an open connection doesn't mean the connection is in a good
@@ -579,12 +568,11 @@ class Client(Mapping):
         Asynchronous messages from LCDd are ignored while sending screen
         add messages.
 
-        :param s: screen to add
+        :param s: screen to add.
         :param use_multi_req: use experimental request batching,
-                              defaults to ``False``
-        :return: screen object
+                              defaults to ``False``.
         :raises KeyError: If there is already another screen with the same
-                          name attached to this client
+                          name attached to this client.
         :raises RequestError: If there was a non-fatal error while creating
                               the new screen.
                               The library automatically attempts to recover
@@ -595,12 +583,10 @@ class Client(Mapping):
                               that led to the attempted error recovery,
                               which resulted in failure.
         :raises FatalError: if there was a fatal error creating the new screen,
-                         requiring a re-instantiation of the LCDd connection
+                            requiring a re-instantiation of the LCDd connection.
         """
         if s.name in self:
-            raise KeyError(f'screen addition aborted: screen {s.name} has'
-                           f' a conflicting name with another previously added'
-                           f' screen')
+            raise KeyError(f'screen name {s.name} is not unique')
 
         candidate_id = self._screen_id_cnt + 1
         add_success = False
@@ -633,9 +619,8 @@ class Client(Mapping):
             if isinstance(response, responses.ErrorResponse):
                 if 'Unknown screen id' not in response:
                     raise exceptions.FatalError(
-                        RuntimeError('Server state inconsistent: unable to roll'
-                                     ' back changes when error occured during '
-                                     'screen addition.'))
+                        RuntimeError('Inconsistent state: unable to revert '
+                                     'changes on screen add error'))
             raise exceptions.RequestError(request_error_request,
                                           request_error_reason)
 
@@ -699,7 +684,7 @@ class Client(Mapping):
                               whether to retry the procedure, or simply
                               re-instantiate the connection.
         :raises FatalError: if there was a fatal error removing the screen,
-                            requiring a re-instantiation of the LCDd connection
+                            requiring a re-instantiation of the LCDd connection.
         """
         req = s.destroy_all_atomic(self._screen_ids[s.name])
         response = self._request(req, self._timeout)
@@ -713,17 +698,17 @@ class Client(Mapping):
         """
         Close the connection to LCDd.
 
-        Before closing the connection, it attempts to gracefully shutdown
-        the background I/O thread and then release the resources associated
-        with the background thread. If the background I/O thread fails to shut-
-        down, or, the resources associated with that thread refuse to be
-        released, then a ``OSError`` exception is raised.
+        Before closing the connection, it attempts to:
+            - Gracefully shutdown the background I/O thread
+            - Release the resources associated with the background thread
+
+        - If the background I/O thread fails to shutdown, or resources cannot
+          be properly deallocated, an ``OSError`` is raised.
 
         It also attempts to perform a graceful shutdown of the LCDd socket
         first, before closing it. If the shutdown is not successful,
-        the exception is masked and the socket simply closed.
-
-        Calling this method multiple times is alright.
+        the exception is masked and the socket simply closed. However, if
+        the socket cannot be closed, an ``OSError`` is raised as well.
 
         :return: None
         :raises OSError: if there was an error closing the connection to

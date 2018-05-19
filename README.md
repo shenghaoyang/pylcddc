@@ -9,8 +9,14 @@ Features:
   ``LCDd`` widgets
     - Full frame support, nest widget objects in frames, treat frames 
       like widget containers
+    - Support for user-created composite widgets, that can be used just 
+      like native widgets (no easy API for now, changes to come later)
+      
 - Decoupled thread to service ``LCDd`` screen switching responses 
 - One I/O method to update screen, no funky exception handling everywhere
+
+# Installation
+``pip install pylcddc``
 
 # More TODOs
 - See ``TODO.md`` for more information and TODOs
