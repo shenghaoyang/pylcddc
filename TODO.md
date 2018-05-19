@@ -4,6 +4,7 @@
 - Write tests for pre-existing functionality
 - Implement support for setting client attributes
 - Find out precisely what characters need to be escaped 
+- Include a protocol version abstraction layer
 
 # Medium priority
 - Implement finer-grained and more precise timeout controls, instead of 

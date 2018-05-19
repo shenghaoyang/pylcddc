@@ -24,7 +24,6 @@ import socket
 import threading
 import time
 import typing
-
 from collections.abc import Mapping
 
 from . import commands
@@ -225,7 +224,7 @@ class IOThread(threading.Thread):
             # wrong
             response_objects = list()
             try:
-                for i in range(replies):
+                for __ in range(replies):
                     response_objects.append(self._receive_queue.get(False))
             except queue.Empty:
                 raise IOError('Unable to communicate with I/O thread over '
@@ -414,7 +413,7 @@ class IOThread(threading.Thread):
                                   ' from client of IOThread')
 
                 requests = bytearray()
-                for b in buf:
+                for __ in buf:
                     request_bytes = self._transmit_queue.get(False)
                     requests.extend(request_bytes)
                 # send request bytes to target
@@ -443,23 +442,22 @@ class IOThread(threading.Thread):
                     else:
                         self._receive_queue.put(robj, False)
                         synchronous_replies += 1
-                else:
-                    self._signal_socket.settimeout(
-                        self._thread_io_timeout)
-                    self._signal_socket.sendall(
-                        IOThreadCommand.RECV_MSG.value.to_bytes(
-                            1, byteorder='little') * synchronous_replies)
-                    lcdd_buffer.clear()
-                    if not r.endswith(b'\n'):
-                        # ignore the error about r being possibly undefined.
-                        # the socket is ready for read when this function is
-                        # called, so there is either data to be placed into
-                        # r after the buffer has been extended, or, no data
-                        # but an exceptional condition on the socket, which
-                        # will cause an exception to be raised before the
-                        # thread continues to this state, and hence, r will
-                        # never be used in a situation where it its undefined.
-                        lcdd_buffer.extend(r)
+                self._signal_socket.settimeout(
+                    self._thread_io_timeout)
+                self._signal_socket.sendall(
+                    IOThreadCommand.RECV_MSG.value.to_bytes(
+                        1, byteorder='little') * synchronous_replies)
+                lcdd_buffer.clear()
+                if not r.endswith(b'\n'):
+                    # ignore the error about r being possibly undefined.
+                    # the socket is ready for read when this function is
+                    # called, so there is either data to be placed into
+                    # r after the buffer has been extended, or, no data
+                    # but an exceptional condition on the socket, which
+                    # will cause an exception to be raised before the
+                    # thread continues to this state, and hence, r will
+                    # never be used in a situation where it its undefined.
+                    lcdd_buffer.extend(r)
 
             with selectors.DefaultSelector() as selector:
                 selector.register(self._signal_socket,
@@ -735,6 +733,7 @@ class Client(Mapping):
                 if isinstance(reply, responses.ErrorResponse):
                     request_error = exceptions.RequestError(
                         add_requests[i], reply.reason)
+                    break
             else:
                 add_success = True
 

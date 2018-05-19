@@ -29,7 +29,7 @@ from .widgets import WidgetType
 
 class Command(enum.Enum):
     """
-    Enumeration listing all possible commands that can be sent to LCDd, 
+    Enumeration listing all possible commands that can be sent to LCDd,
     as well as the command headers for those commands.
     """
     INIT = 'hello'
@@ -78,10 +78,14 @@ class CommandGenerator:
         the values that the attrs
         are to be set to, meant for LCDd attribute set commands, in the form:
 
-        -<attr0> <attr0_value>,
-        -<attr1> <attr1_value>,
+        ``-<attr0> "<attr0_value>"``,
+        ``-<attr1> "<attr1_value>"``,
         ...
-        -<attrn> <attrn_value>
+        ``-<attrn> "<attrn_value>"``
+
+        Where ``attrn`` is the n-th attribute and ``attrn_value`` is the
+        double-quote escaped string representation of the value mapped
+        to ``attrn``
 
         Before writing the value of an attribute to the setting string,
         the attribute is converted to its string representation using

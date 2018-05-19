@@ -91,8 +91,7 @@ class ResponseType(enum.Enum):
                 # we have to convert the base value back into a value
                 # that is of an enumeration type # todo INVESTIGATE
                 return ResponseType(rtype)
-        else:
-            return None
+        return None
 
     @staticmethod
     def attributes(rtype: 'ResponseType') -> ResponseAttribute:
@@ -167,8 +166,10 @@ class ServInfoResponse(BaseResponse):
     """
 
     # regular expression used to match server information string
-    _regex = re.compile('^connect LCDproc\s+(?P<lcdproc_version>(\d+[.]?)*?\d+)\s+'
-                        'protocol\s+(?P<protocol_version>(\d+[.]?)*?\d+)\s+'
+    _regex = re.compile('^connect LCDproc\s+'
+                        '(?P<lcdproc_version>(\d+[.]?)*?((\d+)|[a-zA-Z]+))\s+'
+                        'protocol'
+                        '\s+(?P<protocol_version>(\d+[.]?)*?\d+)\s+'
                         'lcd\s+'
                         'wid\s+(?P<lcd_width>\d+)\s+'
                         'hgt\s+(?P<lcd_height>\d+)\s+'
