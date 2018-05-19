@@ -17,11 +17,10 @@ todo improve argument checking -> too much typing
 """
 
 import abc
+import collections
 import enum
 import string
 import typing
-
-import collections
 from collections.abc import Mapping
 
 from . import commands
