@@ -6,10 +6,6 @@
 - Find out precisely what characters need to be escaped 
 - Include a protocol version abstraction layer
 
-# Medium priority
-- Implement finer-grained and more precise timeout controls, instead of 
-  a single global timeout setting
-- Possibly refactor thread communication
-
 # Low priority 
 - Add a custom widget type and demonstration for user widgets
+- Add delta updates

@@ -231,7 +231,7 @@ class Screen(widgets.WidgetContainer):
         rtn = copy.copy(self._attrs)
 
         # Convert enumeration values into the strings they represent
-        for attr, val in rtn:
+        for attr, val in rtn.items():
             if isinstance(val, (ScreenAttributeValues.Priority,
                                 ScreenAttributeValues.Cursor,
                                 ScreenAttributeValues.Backlight,
@@ -270,7 +270,7 @@ class Screen(widgets.WidgetContainer):
         """
         seq = list()
         seq.extend(commands.CommandGenerator.generate_set_screen_attrs_commands(
-            screen_id, **self._attrs))
+            screen_id, **self.attrs))
         return seq
 
     def init_all(self, screen_id: int) -> typing.Sequence[bytes]:
