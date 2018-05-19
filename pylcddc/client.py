@@ -530,8 +530,10 @@ class Client(Mapping):
             # Split messages into batches according to the maximum
             # number of messages that can be sent to the iothread at once
             batch_size = self._iothread.max_queued_requests
-            for start in range(round(len(msgs)
-                                     / self._iothread.max_queued_requests)):
+            for start in range((len(msgs) // self._iothread.max_queued_requests)
+                               + 1 if (len(msgs)
+                                       % self._iothread.max_queued_requests)
+                               else 0):
                 batch = msgs[start * batch_size:
                              (start * batch_size) + batch_size]
                 replies.extend(self._iothread.request_multiple(batch, timeout))
