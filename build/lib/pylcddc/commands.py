@@ -23,12 +23,13 @@ todo utf-8 or ASCII? should be equivalent and provide us with some future-proofi
 import enum
 import typing
 
+from .screen import ScreenAttributeValues
 from .widgets import WidgetType
 
 
 class Command(enum.Enum):
     """
-    Enumeration listing all possible commands that can be sent to LCDd,
+    Enumeration listing all possible commands that can be sent to LCDd, 
     as well as the command headers for those commands.
     """
     INIT = 'hello'
@@ -77,14 +78,10 @@ class CommandGenerator:
         the values that the attrs
         are to be set to, meant for LCDd attribute set commands, in the form:
 
-        ``-<attr0> "<attr0_value>"``,
-        ``-<attr1> "<attr1_value>"``,
+        -<attr0> <attr0_value>,
+        -<attr1> <attr1_value>,
         ...
-        ``-<attrn> "<attrn_value>"``
-
-        Where ``attrn`` is the n-th attribute and ``attrn_value`` is the
-        double-quote escaped string representation of the value mapped
-        to ``attrn``
+        -<attrn> <attrn_value>
 
         Before writing the value of an attribute to the setting string,
         the attribute is converted to its string representation using
@@ -146,11 +143,23 @@ class CommandGenerator:
         """
         Generate a sequence of LCDd commands to set screen attributes
 
+        Enumeration constants representing screen attributes
+        are automatically converted to the raw values they represent.
+
         :param screen_id: id of the screen to set attributes for
         :param attrs: screen attributes to set
         :return: LCDd screen attribute set command byte sequences that can be
                  sent directly to LCDd
         """
+        # convert the enum constants to the values of those
+        # particular enumeration constants
+        for attr, val in attrs.items():
+            if isinstance(val, (ScreenAttributeValues.Priority,
+                                ScreenAttributeValues.Cursor,
+                                ScreenAttributeValues.Backlight,
+                                ScreenAttributeValues.Heartbeat)):
+                attrs[attr] = val.value
+
         attr_strings = CommandGenerator.generate_attribute_setting(**attrs)
         return [f'{Command.SET_SCREEN_ATTRS.value} {screen_id} '
                 f'{attr_str}\n'.encode('utf-8')

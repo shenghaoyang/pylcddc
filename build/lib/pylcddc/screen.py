@@ -181,7 +181,7 @@ class Screen(widgets.WidgetContainer):
                 c, ScreenAttributeValues.Cursor)
         }
 
-        # no need to validate values of enum attributes, because enum
+        # no need to validate values of other attributes, because other
         # attributes must be of their particular enum types, and if they
         # are the right type, then they cannot have the wrong value.
         value_validators = {
@@ -219,24 +219,13 @@ class Screen(widgets.WidgetContainer):
 
         The returned dictionary is a copy.
         Missing attributes assume their default values, as specified in
-        the LCDproc developer's manual. The dictionary contains attributes
-        stored as a mapping of strings to objects whose string representation
-        can be directly sent to LCDd in a screen attribute set command
-        without any further manipulation.
+        the LCDproc developer's manual.
 
         :return: dictionary listing the attributes of the screen.
         """
         # shallow copy is enough because, for now, all attributes are immutable
         # may change in future, so do take note
         rtn = copy.copy(self._attrs)
-
-        # Convert enumeration values into the strings they represent
-        for attr, val in rtn:
-            if isinstance(val, (ScreenAttributeValues.Priority,
-                                ScreenAttributeValues.Cursor,
-                                ScreenAttributeValues.Backlight,
-                                ScreenAttributeValues.Heartbeat)):
-                rtn[attr] = val.value
         return rtn
 
     @property
