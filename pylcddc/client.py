@@ -95,7 +95,8 @@ class IOThread(threading.Thread):
         self._max_queued_requests = max_queued_requests
 
         # Create signalling sockets for use
-        self._signalling_sockets = socket.socketpair(type=socket.SOCK_DGRAM)
+        self._signalling_sockets = socket.socketpair(family=socket.AF_UNIX,
+                                                     type=socket.SOCK_DGRAM)
         self._signal_socket = self._signalling_sockets[0]
         self._client_signal_socket = self._signalling_sockets[1]
 

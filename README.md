@@ -3,9 +3,6 @@
 A python library for interfacing with ``LCDd``, the server
 component of the commonly known ``LCDproc``
 
-Currently only compatible with Linux, due to usage of 
-Linux-specific POSIX timers
-
 Features:
 
 - Object-oriented interface support for all native 
