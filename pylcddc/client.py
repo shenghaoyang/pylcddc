@@ -94,6 +94,7 @@ class IOThread(threading.Thread):
         self._async_callback = async_callback
         self._closed = False
         self._bufsize = resource.getpagesize()
+        self._signalling_selector = selectors.DefaultSelector()
 
         # AF_UNIX for reliable datagram sockets, as opposed to AF_INET
         # SOCK_SEQPACKET guarantees reliability, but Windows will probably
@@ -102,6 +103,8 @@ class IOThread(threading.Thread):
                                                      type=socket.SOCK_SEQPACKET)
         self._signal_socket = self._signalling_sockets[0]
         self._client_signal_socket = self._signalling_sockets[1]
+        self._signalling_selector.register(self._client_signal_socket,
+                                           selectors.EVENT_READ)
 
         self._transmit_queue = queue.Queue()
         self._receive_queue = queue.Queue()
@@ -110,6 +113,23 @@ class IOThread(threading.Thread):
         self._thread_death_exception = None
 
         self.start()
+
+    @property
+    def event_fileno(self) -> int:
+        """
+        Obtain the file descriptor that represents the socket that can be
+        watched for asynchronous request completion.
+
+        Once request completion has been detected, i.e. this socket can be
+        read without blocking, you can call the ``responses_nonblock()`` method
+        to obtain the response objects.
+
+        :return: file descriptor linked to the notification socket.
+
+        .. note::
+            Not valid once the IOThread has been closed.
+        """
+        return self._client_signal_socket.fileno()
 
     def request_multiple(self, msgs: typing.Sequence[bytes],
                          timeout: typing.Union[float, None] = 1) \
@@ -137,21 +157,105 @@ class IOThread(threading.Thread):
             try:
                 self._client_signal_socket.settimeout(0)
                 self._client_signal_socket.sendall(b'\x00')
-                self._client_signal_socket.settimeout(timeout)
-                buf = self._client_signal_socket.recv(1)
-                # check for empty response
-                if not buf:
-                    raise IOError('I/O thread terminated')
+                if not self.response_nonblock_received(timeout):
+                    raise TimeoutError('Timeout receiving response')
             except socket.timeout:
                 raise TimeoutError('Timeout in I/O thread communication')
 
-            reply = self._receive_queue.get(False)
+            reply = self.response_nonblock()
+            if reply.key != 0x00:
+                raise RuntimeError('Responses from non-blocking requests '
+                                   'not consumed')
 
         except Exception as e:
             self.join()
             raise exceptions.FatalError(e)
 
         return reply.responses
+
+    def request_multiple_nonblock(self, key: typing.Any,
+                                  msgs: typing.Sequence[bytes]) -> None:
+        """
+        Send multiple requests to LCDd, but don't block for responses.
+
+        :param key: key used to distinguish requests from one another.
+                    key value of 0x00 is reserved for blocking requests.
+        :param msgs: requests to send to LCDd.
+        :raises FatalError: on operation timeout or communication error.
+
+        .. note::
+            If a non-blocking request's responses from LCDd have not been
+            consumed, one cannot initiate another blocking request.
+
+        .. note::
+            On fatal exceptions, the I/O Thread is stopped. The user needs to
+            call ``close()`` on the I/O thread to release its
+            resources.
+        """
+        try:
+            if not self.is_alive():
+                raise IOError('I/O thread terminated')
+
+            self._transmit_queue.put(
+                self.IOThreadRequest(msgs, 0x00, key), False)
+
+            self._client_signal_socket.settimeout(0)
+            self._client_signal_socket.sendall(b'\x00')
+        except Exception as e:
+            self.join()
+            raise exceptions.FatalError(e)
+
+    def response_nonblock_received_cnt(self) -> int:
+        """
+        Obtain the count of non-blocking requests that have received replies.
+
+        :return: fufilled request count.
+
+        .. note::
+
+            Since the storage for request responses is a Queue object, the
+            count value may not be exact. Use this value with caution.
+            If in doubt, refer to ``response_nonblock_received`` to confirm
+            that there are no more pending replies to be read.
+        """
+        return self._receive_queue.qsize()
+
+    def response_nonblock_received(
+            self, timeout: typing.Union[float, None] = 0) -> bool:
+        """
+        Check / wait to see if at least the set of responses expected for one
+        non-blocking request have been received.
+
+        :param timeout: timeout to wait, if no responses have been received yet.
+                        See ``selectors`` for information on timeout settings.
+        :return: ``True`` if responses have been received, ``False`` otherwise.
+        :raises exceptions.FatalError: on fatal polling error.
+        """
+        try:
+            ready = self._signalling_selector.select(timeout)
+        except Exception as e:
+            raise exceptions.FatalError(e)
+
+        return True if ready else False
+
+    def response_nonblock(self) -> 'IOThread.IOThreadReply':
+        """
+        Obtain the responses acquired from the earliest
+        request that was sent through the non-blocking request function, for
+        which the responses have not been obtained yet.
+
+        :return: reply object containing received responses.
+        :raises queue.Empty: if no responses have been acquired yet.
+        :raises exceptions.FatalError: on thread signal channel I/O error.
+        """
+        try:
+            buf = self._client_signal_socket.recv(0x01)
+            if not buf:
+                raise RuntimeError('I/O thread terminated')
+        except Exception as e:
+            raise exceptions.FatalError(e)
+
+        return self._receive_queue.get(False)
 
     def join(self, timeout: typing.Optional[typing.Union[None, float]] = None) \
             -> None:
@@ -188,6 +292,7 @@ class IOThread(threading.Thread):
         if self._closed:
             if hasattr(self, '_signalling_sockets'):
                 map(lambda s: s.close(), self._signalling_sockets)
+            self._signalling_selector.close()
             self._closed = True
         else:
             return
@@ -236,19 +341,19 @@ class IOThread(threading.Thread):
 
                 self._signal_socket.settimeout(0)
                 buf = self._signal_socket.recv(0x01)
-
                 if not buf:
                     raise IOError('Signal socket read error')
 
                 request = self._transmit_queue.get(False)
-                self._lcdd_socket.settimeout(0)
                 tx_buffer.extend(b''.join(request.requests))
+                self._lcdd_socket.settimeout(0)
                 sent = self._lcdd_socket.send(tx_buffer)
-                request_servicing = request
                 bytes_dispatched = sent
+                request_servicing = request
 
             def send_request_bytes():
                 nonlocal tx_buffer, bytes_dispatched
+
                 self._lcdd_socket.settimeout(0)
                 sent = self._lcdd_socket.send(tx_buffer[bytes_dispatched:])
                 bytes_dispatched += sent
@@ -337,9 +442,9 @@ class Client(Mapping):
     The client manages screens sent to / from LCDd and provides
     information regarding the display connected to LCDd.
     """
-
     def __init__(self, host: str = 'localhost', port: int = 13666,
-                 timeout: typing.Union[None, float] = 1):
+                 timeout: typing.Union[None, float] = 1,
+                 max_nonblock_operations: int = 32):
         """
         Create a new LCDd client, connecting to a particular host:port
         combination
@@ -350,6 +455,9 @@ class Client(Mapping):
                         this sets the timeout for operations, such as:
                         connecting, creating screens, deleting screens,
                         and updating screens.
+        :param max_nonblock_operations: maximum number of non-blocking screen
+                                        operations that can be in flight at any
+                                        one time.
         :raises FatalError: on failure to setup the connection subsystem
                             and have it connect to LCDd
         :raises ValueError: on invalid arguments
@@ -361,6 +469,10 @@ class Client(Mapping):
         self._screen_id_cnt = 0
         self._screens = dict()
         self._screen_ids = dict()
+        self._max_nonblock_operations = max_nonblock_operations
+        # Starts from 1 because 0x00 is a key reserved by the IO thread
+        self._nonblock_operation_keys = list(
+            range(1, max_nonblock_operations + 1))
 
         start_time = time.monotonic()
         try:
@@ -464,12 +576,26 @@ class Client(Mapping):
                             thread.
         """
         try:
-            replies = self._iothread.request_multiple(msgs, timeout)
+            return self._iothread.request_multiple(msgs, timeout)
         except Exception as e:
             self._good = False
-            raise exceptions.FatalError(e)
+            raise
 
-        return replies
+    def _request_multiple_nonblock(self, msgs: typing.Sequence[bytes],
+                                   key: typing.Any) -> None:
+        """
+        Send multiple non-blocking requests to LCDd.
+
+        :param msgs: requests to send to LCDd.
+        :param key: object used to identify this set of requests.
+
+        :raises FatalError: on fatal internal error.
+        """
+        try:
+            self._iothread.request_multiple_nonblock(key, msgs)
+        except Exception as e:
+            self._good = False
+            raise
 
     @property
     def closed(self) -> bool:
@@ -485,6 +611,24 @@ class Client(Mapping):
         return self._closed
 
     @property
+    def nonblock_update_signaling_fileno(self) -> int:
+        """
+        Obtain the file descriptor that represents the socket that can be
+        watched for replies from LCDd regarding nonblocking screen update
+        requests.
+
+        Once replies have been detected, i.e. this socket can be read without
+        blocking, you can call the ``update_screen_nonblock_finalize()`` method
+        to complete the request.
+
+        :return: file descriptor linked to the notification socket.
+
+        .. note::
+            Not valid once ``close()`` has been called.
+        """
+        return self._iothread.event_fileno
+
+    @property
     def server_information_response(self) \
             -> typing.Union[None, responses.ServInfoResponse]:
         """
@@ -494,21 +638,22 @@ class Client(Mapping):
         The response contains server information, as well as information
         on the display served up by the server.
 
-        :return: server information response, may be ``None`` if
-                 no response was acquired (if the client encountered an
-                 error connecting to the server)
+        :return: server information response.
         """
         return self._serv_info_resp
 
-    def add_screen(self, s: screen.Screen, use_multi_req: bool = False):
+    def add_screen(self, s: screen.Screen):
         """
-        Add a new screen to the client
+        Add a new screen to the client.
+
+        This operation is always blocking. If there are pending screen update
+        operations that have not completed, this method must not be called.
 
         :param s: screen to add.
-        :param use_multi_req: use experimental request batching,
-                              defaults to ``False``.
         :raises KeyError: If there is already another screen with the same
                           name attached to this client.
+        :raises RuntimeError: If there are pending non-blocking screen
+                              update operations that have not completed.
         :raises RequestError: If there was a non-fatal error while creating
                               the new screen.
                               The library automatically attempts to recover
@@ -521,35 +666,26 @@ class Client(Mapping):
         :raises FatalError: if there was a fatal error creating the new screen,
                             requiring a re-instantiation of the LCDd connection.
         """
+        if (self._max_nonblock_operations
+                != len(self._nonblock_operation_keys)):
+            raise RuntimeError('Pending non-blocking screen updates')
+
         if s.name in self:
             raise KeyError(f'screen name {s.name} is not unique')
 
         candidate_id = self._screen_id_cnt + 1
-        add_success = False
         request_error_request = None
         request_error_reason = None
-
         add_requests = s.init_all(candidate_id)
-        if not use_multi_req:
-            for req in add_requests:
-                response = self._request(req, self._timeout)
-                if isinstance(response, responses.ErrorResponse):
-                    request_error_request = req
-                    request_error_reason = response.reason
-                    break
-            else:
-                add_success = True
-        else:
-            replies = self._request_multiple(add_requests, self._timeout)
-            for i, response in enumerate(replies):
-                if isinstance(response, responses.ErrorResponse):
-                    request_error_request = add_requests[i]
-                    request_error_reason = response.reason
-                    break
-            else:
-                add_success = True
+        replies = self._request_multiple(add_requests, self._timeout)
 
-        if not add_success:
+        for i, response in enumerate(replies):
+            if isinstance(response, responses.ErrorResponse):
+                request_error_request = add_requests[i]
+                request_error_reason = response.reason
+                break
+
+        if request_error_reason is not None:
             response = self._request(s.destroy_all_atomic(candidate_id),
                                      self._timeout)
             if isinstance(response, responses.ErrorResponse):
@@ -565,16 +701,26 @@ class Client(Mapping):
             self._screen_ids[s.name] = candidate_id
             self._screens[s.name] = s
 
-    def update_screen(self, s: screen.Screen, use_multi_req: bool = False):
+    def update_screen(self, s: screen.Screen,
+                      blocking: bool = True) -> typing.Union[int, None]:
         """
         Update a screen, updating the widgets on the screen as well as
         the screen's attributes.
 
+        ``update_screen_nonblock_finalize()`` must be called to finalize
+        processing a non-blocking update requests. No blocking screen-related
+        calls can be made until the finalize method returns status objects
+        for ALL non-blocking operations.
+
         :param s: screen to update
-        :param use_multi_req: use experimental request batching,
-                              ``False`` by default
+        :param blocking: whether the update is blocking
+        :return: key used to track status of request when the client was
+                 created in non-blocking mode, else ``None``.
         :raises KeyError: if the screen was never added to the
                           client for display on the server's screen at all.
+        :raises IndexError: if there are too many non-blocking update
+                            operations in flight.
+                            Only raised in non-blocking mode.
         :raises RequestError: if there was a non-fatal error while updating
                               the screen.
                               The screen may be in a inconsistent state,
@@ -584,15 +730,16 @@ class Client(Mapping):
                               attributes may be inconsistent.
                               Users can attempt to update the screen's state
                               again.
+                              Only returned in blocking mode.
         :raises FatalError: if there was a fatal error updating the screen,
-                         requiring a re-instantiation of the LCDd connection
+                            requiring a re-instantiation of the LCDd connection
         """
         update_requests = s.update_all(self._screen_ids[s.name])
-        if not use_multi_req:
-            for req in update_requests:
-                response = self._request(req, self._timeout)
-                if isinstance(response, responses.ErrorResponse):
-                    raise exceptions.RequestError(req, response.reason)
+
+        if not blocking:
+            key = self._nonblock_operation_keys.pop()
+            self._request_multiple_nonblock(update_requests, key)
+            return key
         else:
             replies = self._request_multiple(update_requests, self._timeout)
             for i, reply in enumerate(replies):
@@ -600,13 +747,94 @@ class Client(Mapping):
                     raise exceptions.RequestError(update_requests[i],
                                                   reply.reason)
 
+    def update_screen_nonblock_reply_count(self) -> int:
+        """
+        Obtain the count of non-blocking screen update operations that have
+        replies from LCDd.
+
+        :return: reply count.
+
+        .. note::
+
+            Since the storage for replies is a Queue object, the
+            count value may not be exact. Use this value with caution.
+            If in doubt, refer to ``update_screen_nonblock_completed``
+            to confirm that there are no more pending operations to complete.
+        """
+        return self._iothread.response_nonblock_received_cnt()
+
+    def update_screen_nonblock_reply(
+            self, timeout: typing.Union[float, None] = 0) -> bool:
+        """
+        Check / wait to see if at least one non-blocking screen update
+        operation has a reply from LCDd.
+
+        :param timeout: timeout to wait, if no replies have been received yet.
+                        See ``selectors`` for information on timeout settings.
+        :return: ``True`` if replies are in, ``False`` otherwise.
+        :raises exceptions.FatalError: on fatal polling error.
+
+        .. note::
+
+            Cannot be called once ``close()`` has been called.
+        """
+        try:
+            return self._iothread.response_nonblock_received(timeout)
+        except Exception as e:
+            raise exceptions.FatalError(e)
+
+    def update_screen_nonblock_finalize(
+            self, timeout: typing.Union[float, None] = 0) \
+            -> typing.Mapping[int, typing.Union[str, None]]:
+        """
+        Finalize and obtain the errors of non-blocking screen update operations,
+        for operations that do have replies from LCDd.
+
+        :param timeout: time to wait for a reply from LCDd sufficient to
+                        finalize one request, if insufficient reply data is
+                        present. See ``selectors`` for information on timeout
+                        settings.
+        :return: mapping of non-blocking update keys to error descriptions.
+                 An error description of ``None`` means no error occured.
+                 Otherwise, an error description is the string returned
+                 by LCDd on an update operation error.
+        :raises queue.Empty: if no responses have been acquired yet.
+        :raises exceptions.FatalError: on I/O thread communication exception.
+
+        .. note::
+
+            Cannot be called once ``close()`` has been called.
+        """
+        self.update_screen_nonblock_reply(timeout)
+        replies = []
+        try:
+            replies.append(self._iothread.response_nonblock())
+        except queue.Empty:
+            pass
+        rtn = {}
+        for reply in replies:
+            for response in reply.responses:
+                if isinstance(response, responses.ErrorResponse):
+                    rtn[reply.key] = response.reason
+                    break
+            else:
+                rtn[reply.key] = None
+
+            self._nonblock_operation_keys.append(reply.key)
+        return rtn
+
     def delete_screen(self, s: screen.Screen):
         """
         Delete a screen, removing that screen from LCDd.
 
+        This operation is always blocking. If there are pending screen update
+        operations that have not completed, this method must not be called.
+
         :param s: screen to delete
         :raises KeyError: if the screen was never added to the client for
                           display on the server's screen at all.
+        :raises RuntimeError: If there are pending non-blocking screen
+                              update operations that have not completed.
         :raises RequestError: if there was a non-fatal error while removing
                               the screen.
                               Since the screen deletion action is atomic,
@@ -617,6 +845,10 @@ class Client(Mapping):
         :raises FatalError: if there was a fatal error removing the screen,
                             requiring a re-instantiation of the LCDd connection.
         """
+        if (self._max_nonblock_operations
+                != len(self._nonblock_operation_keys)):
+            raise RuntimeError('Pending non-blocking screen updates')
+
         req = s.destroy_all_atomic(self._screen_ids[s.name])
         response = self._request(req, self._timeout)
         if isinstance(response, responses.ErrorResponse):
