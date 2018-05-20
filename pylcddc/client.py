@@ -98,7 +98,7 @@ class IOThread(threading.Thread):
         # SOCK_SEQPACKET guarantees reliability, but Windows will probably
         # never support it. At least Windows is starting to support AF_UNIX.
         self._signalling_sockets = socket.socketpair(family=socket.AF_UNIX,
-                                                     type=socket.SOCK_DGRAM)
+                                                     type=socket.SOCK_SEQPACKET)
         self._signal_socket = self._signalling_sockets[0]
         self._client_signal_socket = self._signalling_sockets[1]
 
