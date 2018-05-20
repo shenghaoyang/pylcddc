@@ -701,18 +701,18 @@ class Client(Mapping):
             self._screen_ids[s.name] = candidate_id
             self._screens[s.name] = s
 
-    def update_screen(self, s: screen.Screen,
-                      blocking: bool = True) -> typing.Union[int, None]:
+    def update_screens(self, screens: typing.Sequence[screen.Screen],
+                       blocking: bool = True) -> typing.Union[int, None]:
         """
-        Update a screen, updating the widgets on the screen as well as
-        the screen's attributes.
+        Update a number of screens, at once,
+        updating the widgets on the screens as well as the screen's attributes.
 
         ``update_screen_nonblock_finalize()`` must be called to finalize
         processing a non-blocking update requests. No blocking screen-related
         calls can be made until the finalize method returns status objects
         for ALL non-blocking operations.
 
-        :param s: screen to update
+        :param screens: screens to update
         :param blocking: whether the update is blocking
         :return: key used to track status of request when the client was
                  created in non-blocking mode, else ``None``.
@@ -723,6 +723,8 @@ class Client(Mapping):
                             Only raised in non-blocking mode.
         :raises RequestError: if there was a non-fatal error while updating
                               the screen.
+                              If multiple screens are updated at once, only
+                              the first non-fatal error is raised.
                               The screen may be in a inconsistent state,
                               but all widgets and elements will be present
                               on the screen.
@@ -734,7 +736,9 @@ class Client(Mapping):
         :raises FatalError: if there was a fatal error updating the screen,
                             requiring a re-instantiation of the LCDd connection
         """
-        update_requests = s.update_all(self._screen_ids[s.name])
+        update_requests = []
+        for s in screens:
+            update_requests.extend(s.update_all(self._screen_ids[s.name]))
 
         if not blocking:
             key = self._nonblock_operation_keys.pop()

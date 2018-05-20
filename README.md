@@ -106,42 +106,7 @@ print('pylcdd time demo\nUse ^C to exit')
 try:
     while True:
         time_string.text = time.ctime()
-        c.update_screen(main_scr)
-        print('updated time to: ', time.ctime())
-        time.sleep(0.1)
-except lcdexcept.RequestError as e:
-        print('LCDd refused our request', e)
-except lcdexcept.FatalError as e:
-        print('pylcddc fatal internal error', e)
-except KeyboardInterrupt:
-        print('exitting')
-
-c.close()  # there might be exceptions from OS system call failures here
-```
-
-## Enable batched updates for faster operation *EXPERIMENTAL*
-```python
-import pylcddc.client as client
-import pylcddc.widgets as widgets
-import pylcddc.screen as screen
-import pylcddc.exceptions as lcdexcept
-import time
-
-time_string = widgets.Scroller('time', 1, 1, 20, 2,
-                               widgets.Scroller.Direction.HORIZONTAL, 8,
-                               time.ctime())
-main_scr = screen.Screen('main', [time_string],
-                         heartbeat=screen.ScreenAttributeValues.Heartbeat.OFF)
-
-c = client.Client('localhost', 13666)
-c.add_screen(main_scr)
-
-print('pylcdd time demo\nUse ^C to exit')
-
-try:
-    while True:
-        time_string.text = time.ctime()
-        c.update_screen(main_scr, True)
+        c.update_screens([main_scr])
         print('updated time to: ', time.ctime())
         time.sleep(0.1)
 except lcdexcept.RequestError as e:
