@@ -17,13 +17,15 @@ Copyright Shenghao Yang, 2018
 
 See LICENSE.txt.txt for more details.
 """
+import copy
 import queue
+import resource
 import selectors
 import socket
-import struct
 import threading
 import time
 import typing
+from collections import namedtuple
 from collections.abc import Mapping
 
 from . import commands
@@ -67,11 +69,12 @@ class IOThread(threading.Thread):
           the waiting user thread if the user thread was blocked.
         - The thread stop condition variable is set.
     """
+    IOThreadRequest = namedtuple('IOThreadRequest', ('requests', 'timeout', 'key'))
+    IOThreadReply = namedtuple('IOThreadReply', ('responses', 'key'))
 
     def __init__(self, lcdd_socket: socket.SocketType,
                  async_callback: typing.Callable[
-                     [responses.BaseResponse], None],
-                 max_queued_requests: int = 0x100):
+                     [responses.BaseResponse], None]):
         """
         Create a new LCDd I/O thread, and run it.
 
@@ -83,8 +86,6 @@ class IOThread(threading.Thread):
                                context, Users are advised to keep their
                                callbacks short. No requests can be made to LCDd
                                within the callback.
-        :param max_queued_requests: maximum number of requests that can
-                                    be queued to the thread at once.
         :raises OSError: on inability to initialize the I/O thread
         """
         super().__init__(name='pylcddc I/O thread')
@@ -92,7 +93,7 @@ class IOThread(threading.Thread):
         self._lcdd_socket = lcdd_socket
         self._async_callback = async_callback
         self._closed = False
-        self._max_queued_requests = max_queued_requests
+        self._bufsize = resource.getpagesize()
 
         # AF_UNIX for reliable datagram sockets, as opposed to AF_INET
         # SOCK_SEQPACKET guarantees reliability, but Windows will probably
@@ -102,17 +103,13 @@ class IOThread(threading.Thread):
         self._signal_socket = self._signalling_sockets[0]
         self._client_signal_socket = self._signalling_sockets[1]
 
-        self._transmit_queue = queue.Queue(self.max_queued_requests)
-        self._receive_queue = queue.Queue(self.max_queued_requests)
+        self._transmit_queue = queue.Queue()
+        self._receive_queue = queue.Queue()
 
         self._stop_thread = threading.Event()
         self._thread_death_exception = None
 
         self.start()
-
-    @property
-    def max_queued_requests(self) -> int:
-        return self._max_queued_requests
 
     def request_multiple(self, msgs: typing.Sequence[bytes],
                          timeout: typing.Union[float, None] = 1) \
@@ -134,93 +131,27 @@ class IOThread(threading.Thread):
             if not self.is_alive():
                 raise IOError('I/O thread terminated')
 
-            try:
-                for msg in msgs:
-                    self._transmit_queue.put(msg, False)
-            except queue.Full:
-                raise IOError('Unable to enqueue request for transmission')
+            self._transmit_queue.put(
+                self.IOThreadRequest(msgs, timeout, 0x00), False)
 
             try:
-                # Send I/O thread timeout, num of messages, and timeout validity
-                self._client_signal_socket.sendall(
-                    struct.pack('@Nd?', len(msgs),
-                                timeout if timeout is not None else 0,
-                                True if timeout is not None else False))
-                # timeout handled by thread - on timeout, IO thread shuts down
-                # socket, so we'll get notified too.
-                buf = self._client_signal_socket.recv(struct.calcsize('@N'))
-                # Check for empty response
-                if not buf:
-                    raise IOError('I/O thread terminated')
-                replies = struct.unpack('@N', buf)[0]
-                if replies != len(msgs):
-                    raise RuntimeError('I/O thread dispatched mismatched number'
-                                       ' of requests')
-            except socket.timeout:
-                raise TimeoutError('Timeout in I/O thread communication')
-
-            try:
-                response_objects = [self._receive_queue.get(False)
-                                    for __ in range(replies)]
-            except queue.Empty:
-                raise IOError('Insufficient elements in receive queue')
-
-        except Exception as e:
-            self.join()
-            raise exceptions.FatalError(e)
-
-        return response_objects
-
-    def request(self, msg: bytes,
-                timeout: typing.Union[float, None] = 1) -> responses.BaseResponse:
-        """
-        Send a single request to LCDd
-
-        :param msg: request to send to LCDd
-        :param timeout: timeout value, see ``socket.settimeout()``.
-        :return: response object representing the response from LCDd
-
-        :raises FatalError: on error communicating with IOThread or timeout
-
-        .. note::
-            On fatal exceptions, the I/O Thread is stopped. The user needs to
-            call ``close()`` on the I/O thread to release its resources.
-        """
-        try:
-            if not self.is_alive():
-                raise IOError('I/O thread terminated')
-
-            try:
-                self._transmit_queue.put(msg, False)
-            except queue.Full:
-                raise IOError('Transmit queue full')
-
-            try:
-                self._client_signal_socket.sendall(
-                    struct.pack('@Nd?', 1,
-                                timeout if timeout is not None else 0.00,
-                                True if timeout is not None else False))
+                self._client_signal_socket.settimeout(0)
+                self._client_signal_socket.sendall(b'\x00')
                 self._client_signal_socket.settimeout(timeout)
-                buf = self._client_signal_socket.recv(struct.calcsize('@N'))
+                buf = self._client_signal_socket.recv(1)
+                # check for empty response
                 if not buf:
                     raise IOError('I/O thread terminated')
-                replies = struct.unpack('@N', buf)[0]
-                if replies != 1:
-                    raise RuntimeError('I/O thread dispatched mismatched '
-                                       'number of requests')
             except socket.timeout:
                 raise TimeoutError('Timeout in I/O thread communication')
 
-            try:
-                res = self._receive_queue.get(False)
-            except queue.Empty:
-                raise IOError('Insufficient elements in receive queue')
+            reply = self._receive_queue.get(False)
 
         except Exception as e:
             self.join()
             raise exceptions.FatalError(e)
 
-        return res
+        return reply.responses
 
     def join(self, timeout: typing.Optional[typing.Union[None, float]] = None) \
             -> None:
@@ -288,60 +219,81 @@ class IOThread(threading.Thread):
         :return: None
         """
         # buffer used to buffer incoming information
-        lcdd_buffer = bytearray()
-        requests_dispatched = 0
-        pending_synchronous_replies = 0
+        rx_buffer = bytearray()
+        tx_buffer = bytearray()
+
+        request_servicing = None
+        bytes_dispatched = 0
+        response_objects = []
 
         try:
-            def send_request():
-                nonlocal requests_dispatched, pending_synchronous_replies
+            def get_request():
+                nonlocal bytes_dispatched, request_servicing
+                nonlocal tx_buffer
+
+                if request_servicing:
+                    return
+
                 self._signal_socket.settimeout(0)
-                buf = self._signal_socket.recv(struct.calcsize('@Nd?'))
+                buf = self._signal_socket.recv(0x01)
+
                 if not buf:
-                    raise IOError('Client request length read error')
+                    raise IOError('Signal socket read error')
 
-                num_requests, timeout, block = struct.unpack('@Nd?', buf)
-                requests = bytearray()
+                request = self._transmit_queue.get(False)
+                self._lcdd_socket.settimeout(0)
+                tx_buffer.extend(b''.join(request.requests))
+                sent = self._lcdd_socket.send(tx_buffer)
+                request_servicing = request
+                bytes_dispatched = sent
 
-                for __ in range(num_requests):
-                    request_bytes = self._transmit_queue.get(False)
-                    requests.extend(request_bytes)
-
-                self._lcdd_socket.settimeout(None if block else timeout)
-                self._lcdd_socket.sendall(requests)
-                requests_dispatched = num_requests
-                pending_synchronous_replies = num_requests
+            def send_request_bytes():
+                nonlocal tx_buffer, bytes_dispatched
+                self._lcdd_socket.settimeout(0)
+                sent = self._lcdd_socket.send(tx_buffer[bytes_dispatched:])
+                bytes_dispatched += sent
+                if bytes_dispatched == len(tx_buffer):
+                    tx_buffer.clear()
 
             def handle_incoming_responses():
-                nonlocal requests_dispatched, pending_synchronous_replies
+                nonlocal request_servicing
 
                 self._lcdd_socket.settimeout(0)
-                buf = self._lcdd_socket.recv(responses.MAX_RESPONSE_LENGTH
-                                             * self.max_queued_requests)
+                buf = self._lcdd_socket.recv(self._bufsize)
                 if not buf:
                     raise IOError('LCDd terminated connection')
-                lcdd_buffer.extend(buf)
-                if len(lcdd_buffer) > (responses.MAX_RESPONSE_LENGTH
-                                       * self.max_queued_requests):
+                rx_buffer.extend(buf)
+
+                if request_servicing:
+                    buffer_limit = (responses.MAX_RESPONSE_LENGTH
+                                    * len(request_servicing.requests))
+                else:
+                    buffer_limit = responses.MAX_RESPONSE_LENGTH
+
+                if len(rx_buffer) > buffer_limit:
                     raise IOError('RX buffer limit reached - no valid response')
 
-                res = lcdd_buffer.splitlines(True)
+                res = rx_buffer.splitlines(True)
                 for r in res:
                     robj = responses.parse_response(r.decode('utf-8'))
                     if (robj.response_attributes
                             & responses.ResponseAttribute.ASYNCHRONOUS):
                         self._async_callback(robj)
                     else:
-                        self._receive_queue.put(robj, False)
-                        pending_synchronous_replies -= 1
+                        response_objects.append(robj)
 
-                if (not pending_synchronous_replies) and requests_dispatched:
+                if ((request_servicing is not None)
+                        and (len(response_objects)
+                             == len(request_servicing.requests))):
+                    self._receive_queue.put(
+                        self.IOThreadReply(copy.copy(response_objects),
+                                           request_servicing.key))
                     self._signal_socket.settimeout(0)
-                    self._signal_socket.sendall(
-                        struct.pack('@N', requests_dispatched))
-                    requests_dispatched = 0
+                    self._signal_socket.sendall(b'\x00')
+                    response_objects.clear()
+                    request_servicing = None
 
-                lcdd_buffer.clear()
+                rx_buffer.clear()
                 if not r.endswith(b'\n'):
                     # ignore the error about r being possibly undefined.
                     # the socket is ready for read when this function is
@@ -351,17 +303,22 @@ class IOThread(threading.Thread):
                     # will cause an exception to be raised before the
                     # thread continues to this state, and hence, r will
                     # never be used in a situation where it its undefined.
-                    lcdd_buffer.extend(r)
+                    rx_buffer.extend(r)
 
             with selectors.DefaultSelector() as selector:
-                selector.register(self._signal_socket, selectors.EVENT_READ,
-                                  send_request)
-                selector.register(self._lcdd_socket, selectors.EVENT_READ,
-                                  handle_incoming_responses)
+                selector.register(self._signal_socket, selectors.EVENT_READ)
+                selector.register(self._lcdd_socket,
+                                  selectors.EVENT_READ | selectors.EVENT_WRITE)
                 while not self._stop_thread.is_set():
                     ready = selector.select(0.1)
                     for key, event in ready:
-                        key.data()
+                        if key.fileobj == self._signal_socket:
+                            get_request()
+                        if key.fileobj == self._lcdd_socket:
+                            if (event & selectors.EVENT_WRITE) and tx_buffer:
+                                send_request_bytes()
+                            if event & selectors.EVENT_READ:
+                                handle_incoming_responses()
 
         except Exception as e:
             self._thread_death_exception = e
@@ -382,8 +339,7 @@ class Client(Mapping):
     """
 
     def __init__(self, host: str = 'localhost', port: int = 13666,
-                 timeout: typing.Union[None, float] = 1,
-                 max_queued_requests: int = 0x1000):
+                 timeout: typing.Union[None, float] = 1):
         """
         Create a new LCDd client, connecting to a particular host:port
         combination
@@ -394,8 +350,6 @@ class Client(Mapping):
                         this sets the timeout for operations, such as:
                         connecting, creating screens, deleting screens,
                         and updating screens.
-        :param max_queued_requests: maximum number of batched requests
-                                    sent to the I/O handler thread at once.
         :raises FatalError: on failure to setup the connection subsystem
                             and have it connect to LCDd
         :raises ValueError: on invalid arguments
@@ -418,8 +372,7 @@ class Client(Mapping):
                 timeout = max(timeout - time_spent, 0)
 
             self._iothread = IOThread(self._socket,
-                                      self._async_response_handler,
-                                      max_queued_requests)
+                                      self._async_response_handler)
             resp = self._request(
                 commands.CommandGenerator.generate_init_command(), timeout)
             if not isinstance(resp, responses.ServInfoResponse):
@@ -492,11 +445,7 @@ class Client(Mapping):
                             lost synchronization with the background I/O
                             thread.
         """
-        try:
-            return self._iothread.request(msg, timeout)
-        except Exception as e:
-            self._good = False
-            raise exceptions.FatalError(e)
+        return self._request_multiple((msg,), timeout)[0]
 
     def _request_multiple(
             self, msgs: typing.Sequence[bytes],
@@ -514,18 +463,8 @@ class Client(Mapping):
                             lost synchronization with the background I/O
                             thread.
         """
-        replies = list()
         try:
-            # Split messages into batches according to the maximum
-            # number of messages that can be sent to the iothread at once
-            batch_size = self._iothread.max_queued_requests
-            for start in range((len(msgs) // self._iothread.max_queued_requests)
-                               + 1 if (len(msgs)
-                                       % self._iothread.max_queued_requests)
-                               else 0):
-                batch = msgs[start * batch_size:
-                             (start * batch_size) + batch_size]
-                replies.extend(self._iothread.request_multiple(batch, timeout))
+            replies = self._iothread.request_multiple(msgs, timeout)
         except Exception as e:
             self._good = False
             raise exceptions.FatalError(e)
@@ -564,9 +503,6 @@ class Client(Mapping):
     def add_screen(self, s: screen.Screen, use_multi_req: bool = False):
         """
         Add a new screen to the client
-
-        Asynchronous messages from LCDd are ignored while sending screen
-        add messages.
 
         :param s: screen to add.
         :param use_multi_req: use experimental request batching,
@@ -634,8 +570,6 @@ class Client(Mapping):
         Update a screen, updating the widgets on the screen as well as
         the screen's attributes.
 
-        Asynchronous LCDd messages are ignored while updating screen attributes.
-
         :param s: screen to update
         :param use_multi_req: use experimental request batching,
                               ``False`` by default
@@ -669,9 +603,6 @@ class Client(Mapping):
     def delete_screen(self, s: screen.Screen):
         """
         Delete a screen, removing that screen from LCDd.
-
-        Asynchronous LCDd messages are ignored when sending screen delete
-        messages.
 
         :param s: screen to delete
         :raises KeyError: if the screen was never added to the client for
