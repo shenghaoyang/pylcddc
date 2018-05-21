@@ -559,10 +559,7 @@ class Icon(Widget):
                 f'{self.y!r}, {self.icon!r})')
 
     def _validate_params(self, x: int, y: int):
-        # icon is not validated because it is a value of enumeration type
-        # so long as the type is correct, the value cannot be invalid,
-        # unless the user did some trickery, in which case, ombwtfbbq, stop
-        # h4x
+        # icon is not validated because it has a value of enumeration type.
         if (x < 1) or (y < 1):
             raise ValueError('invalid widget placement coordinates: '
                              f'x: {x}, y: {y}')
@@ -600,7 +597,7 @@ class Icon(Widget):
     @property
     def icon(self) -> IconType:
         """
-        Acces the type of icon displayed
+        Access the type of icon displayed
 
         :return: type of icon displayed
         """
@@ -892,8 +889,7 @@ class Frame(Widget, WidgetContainer):
     def _validate_params(self, x: int, y: int, width: int,
                          height: int, inner_width: int,
                          inner_height: int, speed: int):
-        # direction is not validated because it is guaranteed to be a
-        # valid value unless the user is a h4x0r
+        # Direction is a value of enumeration type, so it is not validated.
         if (x < 1) or (y < 1):
             raise ValueError('invalid widget placement coordinates:'
                              f' x: {x}, y: {y}')
@@ -908,10 +904,8 @@ class Frame(Widget, WidgetContainer):
 
     @property
     def ids_required(self) -> int:
-        # generate the amount of ids required for the frame according to the
-        # number of ids required, which lets us support nested frames.....
-        # composite widgets, etc.
-        # not sure if lcdd does have that support...
+        # Generate the amount of IDs required for the frame from summing
+        # the IDs required for the contained widgets.
         return sum((widget.ids_required for widget in self.values())) + 1
 
     @property
@@ -1029,7 +1023,7 @@ class Frame(Widget, WidgetContainer):
     def speed(self) -> int:
         """
         Access the scrolling speed of the frame, in units of
-        rendering ticks per unit scrolling movement
+        rendering ticks per unit scrolling movement.
 
         :return: scrolling speed
         :raises ValueError: when set to an invalid value
@@ -1045,9 +1039,8 @@ class Frame(Widget, WidgetContainer):
     def init_requests(self, screen_id: int, widget_ids: typing.Sequence[int],
                       frame_id: typing.Union[int, None] = None) \
             -> typing.Sequence[bytes]:
-        # overridden here because we have to initialize lots of other
-        # widgets as well
-        # append initialization sequence for frame
+        # Overridden here because we have to initialize lots of other
+        # widgets as well as append initialization sequence for frame
         reqs = list()
         frame_widget_id = widget_ids[0]
         reqs.append(commands.CommandGenerator.generate_add_widget_command(
@@ -1056,7 +1049,7 @@ class Frame(Widget, WidgetContainer):
         # append sequence for other widgets
         allowed_ids = widget_ids[1:]
         for widget in self.values():
-            # this is why an ordereddict is needed, because we *don't* store
+            # this is why an OrderedDict is needed, because we *don't* store
             # the widget IDs, and we must always iterate through them in a
             # consistent order so we always address the widgets using
             # the same ID sets, i.e. the first i.d. set given by the screen
