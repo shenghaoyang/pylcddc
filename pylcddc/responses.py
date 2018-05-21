@@ -17,7 +17,7 @@ documentation at the LCDproc website.
 
 Copyright Shenghao Yang, 2018
 
-See LICENSE.txt.txt for more details.
+See LICENSE.txt for more details.
 """
 
 import enum

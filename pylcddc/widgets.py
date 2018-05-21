@@ -11,7 +11,7 @@ Contains the following elements:
 
 Copyright Shenghao Yang, 2018
 
-See LICENSE.txt.txt for more details.
+See LICENSE.txt for more details.
 
 todo improve argument checking -> too much typing
 """
