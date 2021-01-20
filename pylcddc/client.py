@@ -92,6 +92,18 @@ class Client(Mapping):
         self._serv_info_resp = resp
         self._good = True
 
+    def __enter__(self):
+        """
+        To support using the `with` statement.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """
+        To support using the `with` statement.
+        """
+        self.close()
+
     def __bool__(self) -> bool:
         """
         Check if the connection between the client and LCDd is in a good state
