@@ -1,0 +1,5 @@
+- 0.4.0
+
+  - Prevent I/O thread from spinning around select()
+  - Allow using client as context manager
+  - Added SOCK_STREAM fallback for SOCK_SEQPACKET being unsupported in MacOS
