@@ -323,7 +323,19 @@ class IOThread(threading.Thread):
         bytes_dispatched = 0
         response_objects = []
 
+        selector = selectors.DefaultSelector()
+        selector.register(self._signal_socket, selectors.EVENT_READ)
+        selector.register(self._lcdd_socket, selectors.EVENT_READ)
         try:
+            def send_request_bytes():
+                nonlocal tx_buffer, bytes_dispatched
+                self._lcdd_socket.settimeout(0)
+                sent = self._lcdd_socket.send(tx_buffer[bytes_dispatched:])
+                bytes_dispatched += sent
+                if bytes_dispatched == len(tx_buffer):
+                    tx_buffer.clear()
+                    selector.modify(self._lcdd_socket, selectors.EVENT_READ)
+
             def get_request():
                 nonlocal bytes_dispatched, request_servicing
                 nonlocal tx_buffer
@@ -336,21 +348,11 @@ class IOThread(threading.Thread):
                 if not buf:
                     raise IOError('Signal socket read error')
 
-                request = self._transmit_queue.get(False)
-                tx_buffer.extend(b''.join(request.requests))
-                self._lcdd_socket.settimeout(0)
-                sent = self._lcdd_socket.send(tx_buffer)
-                bytes_dispatched = sent
-                request_servicing = request
-
-            def send_request_bytes():
-                nonlocal tx_buffer, bytes_dispatched
-
-                self._lcdd_socket.settimeout(0)
-                sent = self._lcdd_socket.send(tx_buffer[bytes_dispatched:])
-                bytes_dispatched += sent
-                if bytes_dispatched == len(tx_buffer):
-                    tx_buffer.clear()
+                request_servicing = self._transmit_queue.get(False)
+                tx_buffer.extend(b''.join(request_servicing.requests))
+                bytes_dispatched = 0
+                selector.modify(self._lcdd_socket,
+                                selectors.EVENT_READ | selectors.EVENT_WRITE)
 
             def handle_incoming_responses():
                 nonlocal request_servicing
@@ -402,23 +404,20 @@ class IOThread(threading.Thread):
                     # never be used in a situation where it its undefined.
                     rx_buffer.extend(r)
 
-            with selectors.DefaultSelector() as selector:
-                selector.register(self._signal_socket, selectors.EVENT_READ)
-                selector.register(self._lcdd_socket,
-                                  selectors.EVENT_READ | selectors.EVENT_WRITE)
-                while not self._stop_thread.is_set():
-                    ready = selector.select(0.1)
-                    for key, event in ready:
-                        if key.fileobj == self._signal_socket:
-                            get_request()
-                        if key.fileobj == self._lcdd_socket:
-                            if (event & selectors.EVENT_WRITE) and tx_buffer:
-                                send_request_bytes()
-                            if event & selectors.EVENT_READ:
-                                handle_incoming_responses()
+            while not self._stop_thread.is_set():
+                ready = selector.select(0.1)
+                for key, event in ready:
+                    if key.fileobj == self._signal_socket:
+                        get_request()
+                    if key.fileobj == self._lcdd_socket:
+                        if event & selectors.EVENT_WRITE:
+                            send_request_bytes()
+                        if event & selectors.EVENT_READ:
+                            handle_incoming_responses()
 
         except Exception as e:
             self._thread_death_exception = e
         finally:
+            selector.close()
             self._stop_thread.set()
             self._signal_socket.shutdown(socket.SHUT_RDWR)
